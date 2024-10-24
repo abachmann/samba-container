@@ -125,7 +125,6 @@ QUAL_FQIN = 'fqin'
 
 
 _DISCOVERED_CONTAINER_ENGINES = []
-_BUILDX_BUILDER_NAME = "samba-in-kubernetes"
 
 
 def check_kind(kind):
@@ -205,34 +204,41 @@ def container_engine(cli):
 def container_build(cli, target):
     """Construct and execute a command to build the target container image."""
     eng = container_engine(cli)
-    args = [eng, "build"]
+    tasks = []
 
-    if "docker" in args[0]:
-        # if the target arch and the host_arch are not the same, we need to use buildx
-        if target.arch != host_arch():
-            args = [
-                eng,
-                "buildx",
-                "build",
-                f"--builder={_BUILDX_BUILDER_NAME}",
-                f"--platform=linux/{target.arch}",
-                "--load"
-            ]
-            # Docker's default builder only supports the host architecture.
-            # Therefore, we need to create a new builder to support other
-            # architectures. Errors are suppressed to prevent issues when
-            # the builder is already available - this can be improved later.
-            run(cli, [eng, "buildx", "create", f"--name={_BUILDX_BUILDER_NAME}"], check=False)
-    elif target.arch != host_arch() or FORCE_ARCH_FLAG:
-        # We've noticed a few small quirks when using podman with the --arch
-        # option. The main issue is that building the client image works
-        # but then the toolbox image fails because it somehow doesn't see
-        # the image we just built as usable. This doesn't happen when
-        # --arch is not provided. So if the target arch and the host_arch
-        # are the same, skip passing the extra argument.
-        args.append(f"--arch={target.arch}")
+    # For docker cross-builds we need to use buildx
+    if "docker" in eng and target.arch != host_arch():       
+        args = [eng, "buildx"]
 
-    run(cli, args + create_common_container_engine_args(cli, target), check=True)
+        # Docker's default builder only supports the host architecture.
+        # Therefore, we need to create a new builder to support other
+        # architectures, and we must ensure we start with a fresh builder
+        # that does not contain any images from previous builds.
+        tasks.append(lambda : run(cli, args + ["rm", target.flat_name()], check=False))
+        tasks.append(lambda : run(cli, args + ["create", f"--name={target.flat_name()}"], check=True))
+
+        tasks.append(lambda : run(cli, args + [
+            "build",
+            f"--builder={target.flat_name()}",
+            f"--platform=linux/{target.arch}",
+            "--load"] + create_common_container_engine_args(cli, target), check=True))
+
+        tasks.append(lambda : run(cli, args + ["rm", target.flat_name()], check=True))
+    else:
+        args = [eng, "build"]
+        if target.arch != host_arch() or FORCE_ARCH_FLAG:
+            # We've noticed a few small quirks when using podman with the --arch
+            # option. The main issue is that building the client image works
+            # but then the toolbox image fails because it somehow doesn't see
+            # the image we just built as usable. This doesn't happen when
+            # --arch is not provided. So if the target arch and the host_arch
+            # are the same, skip passing the extra argument.
+            args += [f"--arch={target.arch}"]
+ 
+        tasks.append(lambda : run(cli, args + create_common_container_engine_args(cli, target), check=True))
+
+    for task in tasks:
+        task()
 
 def create_common_container_engine_args(cli, target):
     args = []
